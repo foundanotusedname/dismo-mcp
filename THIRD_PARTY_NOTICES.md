@@ -16,6 +16,7 @@ not replaced by the MIT License for `dismo-mcp`.
 | [sp](https://cran.r-project.org/package=sp) | Spatial classes | GPL-2.0-or-later |
 | [jsonlite](https://github.com/jeroen/jsonlite) | R JSON handling | MIT |
 | [FastMCP](https://github.com/jlowin/fastmcp) | Python MCP framework | Apache-2.0 |
+| [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) | MCP protocol types and transport support | MIT |
 | [Pydantic](https://github.com/pydantic/pydantic) | Python data validation | MIT |
 
 MaxEnt functionality is optional. Any Java runtime, `rJava`, and `maxent.jar`
