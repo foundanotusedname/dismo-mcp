@@ -24,6 +24,7 @@ Model Context Protocol（MCP）服务器。
 - [配置](#配置)
 - [测试与开发](#测试与开发)
 - [设计边界与路线图](#设计边界与路线图)
+- [许可证](#许可证)
 
 ## 核心能力
 
@@ -283,10 +284,15 @@ Prompt：
 | `DISMO_MCP_MAX_POINT_ROWS` | `1000000` | 点表行数上限 |
 | `DISMO_MCP_MAX_INPUT_BYTES` | `2000000000` | 单个输入文件大小上限 |
 | `DISMO_MCP_MAX_R_MEMORY_MB` | `4096` | R vector heap 上限 |
+| `DISMO_MCP_MAX_RUNS` | `1000` | 工作区最多保留的 run 数量；创建新 run 时优先清理已完成 run |
+| `DISMO_MCP_MAX_RUN_BYTES` | `10000000000` | run 目录总容量上限（字节） |
+| `DISMO_MCP_RUN_RETENTION_SECONDS` | `0` | 已完成 run 的保留时间；`0` 表示不按时间自动清理 |
 
 这些限制用于控制误用和并发压力。`R_MAX_VSIZE` 不是 Windows 进程 RSS 或 Job Object 的
 完整替代；需要严格生产隔离时，应在容器、作业调度器或操作系统层增加 CPU、内存、磁盘
 和进程限制。
+run 目录也受数量、总容量和可选保留期限制。清理只针对已完成、失败或取消的 run；如果
+所有现存 run 都仍在运行，服务会拒绝创建新任务而不会删除活动任务。
 
 ## 测试与开发
 
@@ -349,8 +355,14 @@ docs/architecture.md # 官方项目与架构分析
 
 ## 许可证
 
-项目元数据声明 MIT License。`dismo-mcp` 通过 R 进程调用官方 `dismo` 及其依赖；使用
-和分发时也需要遵守这些上游项目各自的许可证与条款。
+`dismo-mcp` 自身源代码采用 [MIT License](LICENSE)。
+
+这是一个独立的 MCP 集成项目，不隶属、也不代表 `rspatial/dismo` 或其维护者。本仓库和
+Python 包不包含或再分发 R、`dismo`、其他 R 包、Java、`maxent.jar`、模型产物、示例数据
+或用户数据。使用者自行安装这些前置组件，并分别遵守它们适用的许可证和条款。
+
+直接依赖及其许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。未来若发布包含
+运行时的容器或离线安装包，需要为其中实际捆绑的精确版本补充相应声明。
 
 ---
 

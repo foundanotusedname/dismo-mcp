@@ -26,6 +26,7 @@ HTTP/SSE/Streamable HTTP integrations.
 - [Configuration](#configuration)
 - [Testing and development](#testing-and-development)
 - [Design boundaries and roadmap](#design-boundaries-and-roadmap)
+- [License](#license)
 
 ## Key capabilities
 
@@ -304,10 +305,17 @@ cannot substitute an arbitrary RDS object.
 | `DISMO_MCP_MAX_POINT_ROWS` | `1000000` | Point-table row limit |
 | `DISMO_MCP_MAX_INPUT_BYTES` | `2000000000` | Per-input file-size limit |
 | `DISMO_MCP_MAX_R_MEMORY_MB` | `4096` | R vector-heap limit |
+| `DISMO_MCP_MAX_RUNS` | `1000` | Maximum retained runs; completed runs are pruned before creating a new run |
+| `DISMO_MCP_MAX_RUN_BYTES` | `10000000000` | Total run-directory size limit in bytes |
+| `DISMO_MCP_RUN_RETENTION_SECONDS` | `0` | Retention period for completed runs; `0` disables time-based pruning |
 
 These limits control accidental overload and concurrency pressure. `R_MAX_VSIZE` is not a full
 replacement for a Windows RSS or Job Object limit. Production deployments requiring hard
 isolation should add container, scheduler, or OS-level CPU, memory, disk, and process limits.
+
+Run directories are also governed by count, total-size, and optional retention limits. Pruning only
+removes completed, failed, or cancelled runs; if all existing runs are active, new work is rejected
+instead of deleting an active run.
 
 ## Testing and development
 
@@ -371,9 +379,17 @@ internal BRT helpers, and low-level functions. They are not exposed one-to-one b
 
 ## License
 
-The project metadata declares the MIT License. `dismo-mcp` invokes the upstream `dismo` R package
-and its dependencies in a separate R process; use and distribution must also comply with the
-licenses and terms of those upstream projects.
+The `dismo-mcp` source code is available under the [MIT License](LICENSE).
+
+This is an independent MCP integration. It is not affiliated with or endorsed by `rspatial/dismo`
+or its maintainers. This repository and its Python package do not include or redistribute R,
+`dismo`, other R packages, Java, `maxent.jar`, model artifacts, example datasets, or user data.
+Users install those prerequisites independently and must comply with their applicable licenses and
+terms.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for direct dependency notices. A future
+container or offline installer that bundles a runtime must document the exact bundled versions and
+include their required notices.
 
 ---
 
