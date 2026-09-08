@@ -10,6 +10,17 @@ from pathlib import Path
 from .errors import ConfigurationError, PathPolicyError
 
 
+_RASTER_SIDECAR_SUFFIXES = (
+    ".gri",
+    ".hdr",
+    ".prj",
+    ".aux.xml",
+    ".ovr",
+    ".tfw",
+    ".wld",
+)
+
+
 def _discover_rscript() -> Path | None:
     configured = os.getenv("DISMO_MCP_RSCRIPT")
     if configured:
@@ -56,6 +67,9 @@ class Settings:
     max_point_rows: int = 1_000_000
     max_input_bytes: int = 2_000_000_000
     max_r_memory_mb: int = 4096
+    max_run_count: int = 1000
+    max_run_bytes: int = 10_000_000_000
+    run_retention_seconds: int = 0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,10 +92,15 @@ class Settings:
         max_point_rows = int(os.getenv("DISMO_MCP_MAX_POINT_ROWS", "1000000"))
         max_input_bytes = int(os.getenv("DISMO_MCP_MAX_INPUT_BYTES", "2000000000"))
         max_r_memory_mb = int(os.getenv("DISMO_MCP_MAX_R_MEMORY_MB", "4096"))
+        max_run_count = int(os.getenv("DISMO_MCP_MAX_RUNS", "1000"))
+        max_run_bytes = int(os.getenv("DISMO_MCP_MAX_RUN_BYTES", "10000000000"))
+        run_retention_seconds = int(os.getenv("DISMO_MCP_RUN_RETENTION_SECONDS", "0"))
         if max_concurrent_r < 1 or max_queued_r < 0 or queue_wait_seconds < 1:
             raise ConfigurationError("R concurrency and queue settings must be non-negative/positive")
         if max_raster_cells < 1 or max_point_rows < 1 or max_input_bytes < 1 or max_r_memory_mb < 128:
             raise ConfigurationError("R resource limits must be positive")
+        if max_run_count < 1 or max_run_bytes < 1 or run_retention_seconds < 0:
+            raise ConfigurationError("Run storage limits must be positive and retention non-negative")
         roots = tuple(dict.fromkeys([workspace, *extra_roots]))
         return cls(
             workspace,
@@ -95,6 +114,9 @@ class Settings:
             max_point_rows,
             max_input_bytes,
             max_r_memory_mb,
+            max_run_count,
+            max_run_bytes,
+            run_retention_seconds,
         )
 
     def resolve_input(self, value: str, *, suffixes: tuple[str, ...] | None = None) -> Path:
@@ -112,6 +134,36 @@ class Settings:
         if suffixes and path.suffix.lower() not in suffixes:
             allowed = ", ".join(suffixes)
             raise PathPolicyError(f"Expected one of [{allowed}], got: {path.name}")
+        return path
+
+    def resolve_raster_input(self, value: str, *, suffixes: tuple[str, ...]) -> Path:
+        """Resolve a raster and validate all supported sidecars under the same policy."""
+        path = self.resolve_input(value, suffixes=suffixes)
+        stem = path.with_suffix("")
+        components = [path]
+        for suffix in _RASTER_SIDECAR_SUFFIXES:
+            candidate = Path(f"{stem}{suffix}")
+            if candidate.is_file():
+                components.append(candidate)
+        for suffix in (".aux.xml", ".ovr"):
+            candidate = Path(f"{path}{suffix}")
+            if candidate.is_file():
+                components.append(candidate)
+        roots = ", ".join(str(root) for root in self.allowed_roots)
+        seen: set[Path] = set()
+        for component in components:
+            resolved = component.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if not any(_is_within(resolved, root) for root in self.allowed_roots):
+                raise PathPolicyError(
+                    f"Raster sidecar is outside allowed roots ({roots}): {resolved}"
+                )
+            if resolved.stat().st_size > self.max_input_bytes:
+                raise PathPolicyError(
+                    f"Raster sidecar exceeds DISMO_MCP_MAX_INPUT_BYTES ({self.max_input_bytes}): {resolved}"
+                )
         return path
 
     def require_rscript(self) -> Path:

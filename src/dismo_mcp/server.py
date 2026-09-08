@@ -55,7 +55,12 @@ def create_server(
     auth: AuthProvider | None = None,
 ) -> FastMCP:
     settings = settings or Settings.from_env()
-    store = ArtifactStore(settings.workspace)
+    store = ArtifactStore(
+        settings.workspace,
+        max_runs=settings.max_run_count,
+        max_bytes=settings.max_run_bytes,
+        retention_seconds=settings.run_retention_seconds,
+    )
     bridge = RBridge(settings, store)
 
     mcp = FastMCP(
@@ -79,7 +84,7 @@ def create_server(
     def raster_paths(values: list[str]) -> list[str]:
         if not values:
             raise ValueError("At least one raster path is required")
-        return [input_path(value, RASTER_SUFFIXES) for value in values]
+        return [str(settings.resolve_raster_input(value, suffixes=RASTER_SUFFIXES)) for value in values]
 
     def model_predictor_manifest(model_run_id: str, paths: list[str]) -> tuple[str, dict[str, Any]]:
         manifest_path = store.artifact_path(model_run_id, "predictor_manifest")
@@ -186,7 +191,7 @@ def create_server(
     ) -> dict[str, Any]:
         """Sample reproducible background points from non-NA cells of a mask raster."""
         params: dict[str, Any] = {
-            "mask_path": input_path(mask_path, RASTER_SUFFIXES),
+            "mask_path": str(settings.resolve_raster_input(mask_path, suffixes=RASTER_SUFFIXES)),
             "n": n,
             "lon_col": lon_col,
             "lat_col": lat_col,
@@ -441,9 +446,9 @@ def create_server(
         )
 
     @mcp.tool(
-        annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+        annotations=ToolAnnotations(readOnlyHint=False, openWorldHint=False),
         tags={"analysis", "niche"},
-        auth=read_auth,
+        auth=write_auth,
     )
     def calculate_niche_overlap(
         first_prediction_path: str,
@@ -456,8 +461,12 @@ def create_server(
         return run(
             "niche_overlap",
             {
-                "first_prediction_path": input_path(first_prediction_path, RASTER_SUFFIXES),
-                "second_prediction_path": input_path(second_prediction_path, RASTER_SUFFIXES),
+                "first_prediction_path": str(
+                    settings.resolve_raster_input(first_prediction_path, suffixes=RASTER_SUFFIXES)
+                ),
+                "second_prediction_path": str(
+                    settings.resolve_raster_input(second_prediction_path, suffixes=RASTER_SUFFIXES)
+                ),
                 "statistic": statistic.value,
                 "mask": mask,
                 "check_negatives": check_negatives,

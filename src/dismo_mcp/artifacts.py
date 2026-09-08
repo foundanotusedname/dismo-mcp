@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .errors import PathPolicyError
+from .errors import ArtifactStoreError, PathPolicyError
 
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$")
 
@@ -23,33 +25,122 @@ class RunContext:
 
 
 class ArtifactStore:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        max_runs: int = 1000,
+        max_bytes: int = 10_000_000_000,
+        retention_seconds: int = 0,
+    ) -> None:
+        if max_runs < 1 or max_bytes < 1 or retention_seconds < 0:
+            raise ValueError("Invalid run storage limits")
         self.root = workspace / ".dismo-mcp" / "runs"
         self.root.mkdir(parents=True, exist_ok=True)
+        self.max_runs = max_runs
+        self.max_bytes = max_bytes
+        self.retention_seconds = retention_seconds
+        self._lock = threading.RLock()
+
+    def _run_directories(self) -> list[Path]:
+        return [
+            path
+            for path in self.root.iterdir()
+            if path.is_dir() and RUN_ID_RE.fullmatch(path.name)
+        ]
+
+    @staticmethod
+    def _directory_size(directory: Path) -> int:
+        total = 0
+        for path in directory.rglob("*"):
+            if path.is_file():
+                try:
+                    total += path.stat().st_size
+                except OSError:
+                    continue
+        return total
+
+    @staticmethod
+    def _metadata_for(directory: Path) -> dict[str, Any] | None:
+        try:
+            value = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _prune_locked(self) -> None:
+        directories = self._run_directories()
+        metadata = {path: self._metadata_for(path) for path in directories}
+        candidates = [
+            path
+            for path in directories
+            if metadata[path] and metadata[path].get("status") in {"completed", "failed", "cancelled"}
+        ]
+        candidates.sort(key=lambda path: path.name)
+        now = datetime.now(UTC).timestamp()
+        removed: set[Path] = set()
+
+        def remove(path: Path) -> None:
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                return
+            removed.add(path)
+
+        if self.retention_seconds:
+            cutoff = now - self.retention_seconds
+            for path in candidates:
+                value = metadata[path] or {}
+                timestamp = value.get("completed_at") or value.get("created_at")
+                try:
+                    old = datetime.fromisoformat(str(timestamp)).timestamp()
+                except (TypeError, ValueError):
+                    old = path.stat().st_mtime
+                if old < cutoff:
+                    remove(path)
+
+        directories = [path for path in directories if path not in removed]
+        candidates = [path for path in candidates if path not in removed]
+        total_bytes = sum(self._directory_size(path) for path in directories)
+        while len(directories) >= self.max_runs or total_bytes >= self.max_bytes:
+            if not candidates:
+                raise ArtifactStoreError(
+                    "Run storage limit reached; remove completed runs or increase "
+                    "DISMO_MCP_MAX_RUNS/DISMO_MCP_MAX_RUN_BYTES"
+                )
+            path = candidates.pop(0)
+            size = self._directory_size(path)
+            remove(path)
+            if path in removed:
+                directories.remove(path)
+                total_bytes -= size
 
     def create(self, operation: str) -> RunContext:
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        run_id = f"{stamp}-{uuid.uuid4().hex[:8]}"
-        directory = self.root / run_id
-        directory.mkdir(parents=False, exist_ok=False)
-        context = RunContext(run_id, operation, directory)
-        self.write_metadata(
-            context,
-            {
-                "run_id": run_id,
-                "operation": operation,
-                "status": "running",
-                "created_at": datetime.now(UTC).isoformat(),
-                "artifacts": [],
-            },
-        )
-        return context
+        with self._lock:
+            self._prune_locked()
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            run_id = f"{stamp}-{uuid.uuid4().hex[:8]}"
+            directory = self.root / run_id
+            directory.mkdir(parents=False, exist_ok=False)
+            context = RunContext(run_id, operation, directory)
+            self.write_metadata(
+                context,
+                {
+                    "run_id": run_id,
+                    "operation": operation,
+                    "status": "running",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "artifacts": [],
+                },
+            )
+            return context
 
     def write_metadata(self, context: RunContext, metadata: dict[str, Any]) -> None:
-        target = context.directory / "metadata.json"
-        temporary = context.directory / "metadata.json.tmp"
-        temporary.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(target)
+        with self._lock:
+            target = context.directory / "metadata.json"
+            temporary = context.directory / "metadata.json.tmp"
+            temporary.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(target)
 
     def finish(
         self,
@@ -58,26 +149,30 @@ class ArtifactStore:
         *,
         status: str = "completed",
     ) -> dict[str, Any]:
-        metadata = {
-            "run_id": context.run_id,
-            "operation": context.operation,
-            "status": status,
-            "created_at": self.read(context.run_id).get("created_at"),
-            "completed_at": datetime.now(UTC).isoformat(),
-            "artifacts": result.get("artifacts", []),
-            "result": result,
-        }
-        self.write_metadata(context, metadata)
-        return metadata
+        with self._lock:
+            metadata = {
+                "run_id": context.run_id,
+                "operation": context.operation,
+                "status": status,
+                "created_at": self.read(context.run_id).get("created_at"),
+                "completed_at": datetime.now(UTC).isoformat(),
+                "artifacts": result.get("artifacts", []),
+                "result": result,
+            }
+            self.write_metadata(context, metadata)
+            return metadata
 
     def fail(self, context: RunContext, message: str) -> None:
-        current = self.read(context.run_id)
-        current.update(
-            status="failed",
-            completed_at=datetime.now(UTC).isoformat(),
-            error=message,
-        )
-        self.write_metadata(context, current)
+        with self._lock:
+            current = self.read(context.run_id)
+            if current.get("status") in {"completed", "failed", "cancelled"}:
+                return
+            current.update(
+                status="failed",
+                completed_at=datetime.now(UTC).isoformat(),
+                error=message,
+            )
+            self.write_metadata(context, current)
 
     def directory_for(self, run_id: str) -> Path:
         if not RUN_ID_RE.fullmatch(run_id):
@@ -88,8 +183,9 @@ class ArtifactStore:
         return directory
 
     def read(self, run_id: str) -> dict[str, Any]:
-        path = self.directory_for(run_id) / "metadata.json"
-        return json.loads(path.read_text(encoding="utf-8"))
+        with self._lock:
+            path = self.directory_for(run_id) / "metadata.json"
+            return json.loads(path.read_text(encoding="utf-8"))
 
     def artifact_path(self, run_id: str, role: str) -> Path:
         metadata = self.read(run_id)

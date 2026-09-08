@@ -156,22 +156,27 @@ class RBridge:
         result = envelope.get("result") or {}
         result["run_id"] = run.run_id
         result["operation"] = operation
-        self.store.finish(run, result)
+        with self._process_lock:
+            # Cancellation and completion must be serialized so a late R response
+            # cannot resurrect a run that the caller already cancelled.
+            if self.store.read(run.run_id).get("status") != "running":
+                raise RBridgeError(f"R operation cancelled: {operation}")
+            self.store.finish(run, result)
         return result, run
 
     def cancel(self, run_id: str) -> bool:
         """Request cancellation of a queued or running R operation."""
         directory = self.store.directory_for(run_id)
-        metadata = self.store.read(run_id)
-        if metadata.get("status") != "running":
-            return False
         with self._process_lock:
+            metadata = self.store.read(run_id)
+            if metadata.get("status") != "running":
+                return False
             self._cancelled.add(run_id)
             process = self._processes.get(run_id)
             if process is not None and process.poll() is None:
                 process.terminate()
-        self.store.fail(
-            RunContext(run_id, metadata.get("operation", "unknown"), directory),
-            "R operation cancelled by caller",
-        )
+            self.store.fail(
+                RunContext(run_id, metadata.get("operation", "unknown"), directory),
+                "R operation cancelled by caller",
+            )
         return True

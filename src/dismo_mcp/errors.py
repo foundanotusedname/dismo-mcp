@@ -13,6 +13,9 @@ class PathPolicyError(DismoMcpError):
     """Raised when a requested path is outside configured roots."""
 
 
+class ArtifactStoreError(DismoMcpError):
+    """Raised when run storage limits prevent creating another run."""
+
+
 class RBridgeError(DismoMcpError):
     """Raised when a whitelisted R operation fails."""
-
