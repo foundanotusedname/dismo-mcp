@@ -4,6 +4,8 @@ import asyncio
 import json
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,7 @@ from dismo_mcp.artifacts import ArtifactStore
 from dismo_mcp.auth import StaticTokenVerifier, is_loopback_host
 from dismo_mcp.__main__ import main
 from dismo_mcp.config import Settings
-from dismo_mcp.errors import ConfigurationError, PathPolicyError, RBridgeError
+from dismo_mcp.errors import ArtifactStoreError, ConfigurationError, PathPolicyError, RBridgeError
 from dismo_mcp.provenance import assert_file_manifest_matches, build_predictor_manifest
 from dismo_mcp.r_bridge import RBridge
 from dismo_mcp.server import create_http_server, create_server
@@ -164,6 +166,81 @@ def test_predictor_manifest_detects_content_changes(tmp_path: Path) -> None:
         assert_file_manifest_matches(expected, current)
 
 
+def test_raster_sidecar_obeys_input_limit(tmp_path: Path) -> None:
+    raster = tmp_path / "predictor.grd"
+    raster.write_bytes(b"grid")
+    sidecar = tmp_path / "predictor.gri"
+    sidecar.write_bytes(b"too-large")
+    settings = Settings(tmp_path, (tmp_path,), None, 30, max_input_bytes=8)
+    with pytest.raises(PathPolicyError, match="Raster sidecar exceeds"):
+        settings.resolve_raster_input("predictor.grd", suffixes=(".grd",))
+
+
+def test_run_storage_prunes_finished_but_rejects_active(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path, max_runs=1, max_bytes=10_000)
+    active = store.create("active")
+    with pytest.raises(ArtifactStoreError, match="Run storage limit"):
+        store.create("blocked")
+    store.fail(active, "done")
+    replacement = store.create("replacement")
+    assert replacement.run_id != active.run_id
+    assert not active.directory.exists()
+
+
+def test_late_r_response_cannot_resurrect_cancelled_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ready = threading.Event()
+    release = threading.Event()
+
+    class LateResponseProcess:
+        returncode = 0
+
+        def __init__(self, command: list[str], **_: object) -> None:
+            self.command = command
+
+        def communicate(self, timeout: int | None = None) -> tuple[str, str]:
+            ready.set()
+            assert release.wait(2)
+            Path(self.command[-1]).write_text(
+                json.dumps({"ok": True, "result": {}}), encoding="utf-8"
+            )
+            return "", ""
+
+        def poll(self) -> int | None:
+            return None if not release.is_set() else self.returncode
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr("dismo_mcp.r_bridge.subprocess.Popen", LateResponseProcess)
+    settings = Settings(tmp_path, (tmp_path,), Path(sys.executable), 5)
+    store = ArtifactStore(tmp_path)
+    bridge = RBridge(settings, store)
+    result: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            bridge.execute("system_info", {})
+        except BaseException as exc:  # noqa: BLE001 - assertion target
+            result.append(exc)
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    assert ready.wait(2)
+    time.sleep(0.01)
+    run_id = store.list()[0]["run_id"]
+    assert bridge.cancel(str(run_id))
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result and isinstance(result[0], RBridgeError)
+    assert store.read(str(run_id))["status"] == "failed"
+
+
 def test_http_factory_requires_auth_and_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "DISMO_MCP_BEARER_TOKEN",
@@ -189,6 +266,7 @@ def test_cancel_queued_run_marks_failed(tmp_path: Path) -> None:
     run = store.create("long_operation")
     assert bridge.cancel(run.run_id)
     assert store.read(run.run_id)["status"] == "failed"
+    assert not bridge.cancel(run.run_id)
 
 
 def test_r_process_crash_marks_failed(tmp_path: Path) -> None:
